@@ -19,6 +19,7 @@ use windows_sys::Win32::{
 
 use raw_window_handle::RawWindowHandle;
 
+#[inline]
 unsafe fn read_to_string(ptr: *const u16) -> String {
     let mut cursor = ptr;
 
@@ -30,7 +31,7 @@ unsafe fn read_to_string(ptr: *const u16) -> String {
         cursor = cursor.add(1);
     }
 
-    let slice = std::slice::from_raw_parts(ptr, cursor - ptr);
+    let slice = std::slice::from_raw_parts(ptr, cursor.offset_from(ptr) as usize);
     String::from_utf16(slice).unwrap()
 }
 
@@ -45,9 +46,17 @@ fn wrap_err(hresult: HRESULT) -> Result<()> {
     }
 }
 
+#[derive(Copy, Clone)]
 #[repr(C)]
 struct Interface<T> {
     vtable: *mut T,
+}
+
+impl<T> Interface<T> {
+    #[inline]
+    fn vtbl(&self) -> &T {
+        unsafe { &*self.vtable }
+    }
 }
 
 #[repr(C)]
@@ -58,6 +67,13 @@ struct IUnknownV {
 }
 
 type IUnknown = Interface<IUnknownV>;
+
+#[inline]
+fn drop_impl(ptr: *mut std::ffi::c_void) {
+    unsafe {
+        ((&*ptr.cast::<IUnknown>()).vtbl().release)(ptr);
+    }
+}
 
 #[repr(C)]
 struct IShellItemV {
@@ -70,22 +86,32 @@ struct IShellItemV {
     __compare: usize,
 }
 
-type IShellItem = Interface<IShellItemV>;
+#[repr(C)]
+struct IShellItem(*mut Interface<IShellItemV>);
 
-impl IShellItemV {
+impl IShellItem {
     fn get_path(&self) -> Result<PathBuf> {
-        let mut dname = std::mem::MaybeUninit::uninit();
-        wrap_err((*self.get_display_name)(
-            self.cast(),
-            SIGDN_FILESYSPATH,
-            dname.as_mut_ptr(),
-        ))?;
-        let dname = dname.assume_init();
+        let filename = unsafe {
+            let mut dname = std::mem::MaybeUninit::uninit();
+            wrap_err(((&*self.0).vtbl().get_display_name)(
+                self.0.cast(),
+                SIGDN_FILESYSPATH,
+                dname.as_mut_ptr(),
+            ))?;
 
-        let filename = read_to_string(dname);
-        CoTaskMemFree(dname);
+            let dname = dname.assume_init();
+            let fname = read_to_string(dname);
+            CoTaskMemFree(dname.cast());
+            fname
+        };
 
-        Ok(filename)
+        Ok(filename.into())
+    }
+}
+
+impl Drop for IShellItem {
+    fn drop(&mut self) {
+        drop_impl(self.0.cast());
     }
 }
 
@@ -100,20 +126,25 @@ struct IShellItemArrayV {
     get_item_at: unsafe extern "system" fn(
         this: *mut c_void,
         dwindex: u32,
-        ppsi: *mut *mut IShellItem,
+        ppsi: *mut IShellItem,
     ) -> HRESULT,
     __enum_items: usize,
 }
 
-type IShellItemArray = Interface<IShellItemArrayV>;
+#[repr(C)]
+struct IShellItemArray(*mut Interface<IShellItemArrayV>);
+
+impl Drop for IShellItemArray {
+    fn drop(&mut self) {
+        drop_impl(self.0.cast());
+    }
+}
 
 #[repr(C)]
 struct IModalWindowV {
     base: IUnknownV,
     show: unsafe extern "system" fn(this: *mut c_void, owner: HWND) -> HRESULT,
 }
-
-type IModalWindow = Interface<IModalWindowV>;
 
 /// <https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ifiledialog>
 #[repr(C)]
@@ -144,7 +175,7 @@ struct IFileDialogV {
     __set_ok_button_label: usize,
     __set_file_name_label: usize,
     get_result:
-        unsafe extern "system" fn(this: *mut c_void, shell_item: *mut *mut IShellItem) -> HRESULT,
+        unsafe extern "system" fn(this: *mut c_void, shell_item: *mut IShellItem) -> HRESULT,
     __add_place: usize,
     set_default_extension:
         unsafe extern "system" fn(this: *mut c_void, default_ext: PCWSTR) -> HRESULT,
@@ -154,7 +185,14 @@ struct IFileDialogV {
     __set_filter: usize,
 }
 
-type IFileDialog = Interface<IFileDialogV>;
+#[repr(C)]
+struct IFileDialog(*mut Interface<IFileDialogV>);
+
+impl Drop for IFileDialog {
+    fn drop(&mut self) {
+        drop_impl(self.0.cast());
+    }
+}
 
 /// <https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ifileopendialog>
 #[repr(C)]
@@ -162,15 +200,22 @@ struct IFileOpenDialogV {
     base: IFileDialogV,
     /// <https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileopendialog-getresults>
     get_results:
-        unsafe extern "system" fn(this: *mut c_void, results: *mut *mut IShellItemArray) -> HRESULT,
+        unsafe extern "system" fn(this: *mut c_void, results: *mut IShellItemArray) -> HRESULT,
     __get_selected_items: usize,
 }
 
-type IFileOpenDialog = Interface<IFileOpenDialogV>;
+#[repr(C)]
+struct IFileOpenDialog(*mut Interface<IFileOpenDialogV>);
+
+impl Drop for IFileOpenDialog {
+    fn drop(&mut self) {
+        drop_impl(self.0.cast());
+    }
+}
 
 enum DialogInner {
-    Open(*mut IFileOpenDialog),
-    Save(*mut IFileDialog),
+    Open(IFileOpenDialog),
+    Save(IFileDialog),
 }
 
 impl DialogInner {
@@ -197,9 +242,9 @@ impl DialogInner {
             let iptr = inner.assume_init();
 
             Ok(if open {
-                Self::Open(iptr.cast())
+                Self::Open(IFileOpenDialog(iptr.cast()))
             } else {
-                Self::Save(iptr.cast())
+                Self::Save(IFileDialog(iptr.cast()))
             })
         }
     }
@@ -215,74 +260,88 @@ impl DialogInner {
     }
 
     #[inline]
-    unsafe fn fd(&self) -> &mut IFileDialog {
+    unsafe fn fd(&self) -> (*mut std::ffi::c_void, &IFileDialogV) {
         match self {
-            Self::Save(s) => s,
-            Self::Open(o) => unsafe { &mut (*o).base },
+            Self::Save(s) => unsafe { (s.0.cast(), &*(*s.0).vtable) },
+            Self::Open(o) => unsafe { (o.0.cast(), &(&*(*o.0).vtable).base) },
         }
     }
 
     #[inline]
     unsafe fn set_options(&self, opts: FILEOPENDIALOGOPTIONS) -> Result<()> {
-        wrap_err(self.fd().set_options(self, opts))
+        let (d, v) = self.fd();
+        wrap_err((v.set_options)(d, opts))
     }
 
     #[inline]
     unsafe fn set_title(&self, title: &[u16]) -> Result<()> {
-        wrap_err(self.fd().set_title(self, title.as_ptr()))
+        let (d, v) = self.fd();
+        wrap_err((v.set_title)(d, title.as_ptr()))
     }
 
     #[inline]
     unsafe fn set_default_extension(&self, extension: &[u16]) -> Result<()> {
-        wrap_err(self.fd().set_default_extension(self, extension.as_ptr()))
+        let (d, v) = self.fd();
+        wrap_err((v.set_default_extension)(d, extension.as_ptr()))
     }
 
     #[inline]
     unsafe fn set_file_types(&self, specs: &[COMDLG_FILTERSPEC]) -> Result<()> {
-        wrap_err(
-            self.fd()
-                .set_file_types(self, specs.len() as _, specs.as_ptr()),
-        )
+        let (d, v) = self.fd();
+        wrap_err((v.set_file_types)(d, specs.len() as _, specs.as_ptr()))
     }
 
     #[inline]
     unsafe fn set_filename(&self, fname: &[u16]) -> Result<()> {
-        wrap_err(self.fd().set_file_name(self, fname.as_ptr()))
+        let (d, v) = self.fd();
+        wrap_err((v.set_file_name)(d, fname.as_ptr()))
     }
 
     #[inline]
     unsafe fn set_folder(&self, folder: Option<&IShellItem>) -> Result<()> {
-        wrap_err(self.fd().set_folder(self, folder.map(|si| si.cast())))
+        let (d, v) = self.fd();
+        wrap_err((v.set_folder)(d, folder.map(|si| si.0.cast())))
     }
 
     #[inline]
     unsafe fn show(&self, parent: Option<HWND>) -> Result<()> {
-        wrap_err(self.fd().show(self, parent.unwrap_or_default()))
+        let (d, v) = self.fd();
+        wrap_err((v.base.show)(d, parent.unwrap_or_default()))
     }
 
     #[inline]
     unsafe fn get_result(&self) -> Result<PathBuf> {
+        let (d, v) = self.fd();
         let mut res = std::mem::MaybeUninit::uninit();
-        wrap_err(self.fd().get_result(self, res.as_mut_ptr()))?;
+        wrap_err((v.get_result)(d, res.as_mut_ptr()))?;
         let res = res.assume_init();
-        (&*res).get_path();
+        res.get_path()
     }
 
     #[inline]
-    unsafe fn get_results(&self) -> Result<PathBuf> {
+    unsafe fn get_results(&self) -> Result<Vec<PathBuf>> {
         let Self::Open(od) = self else { unreachable!() };
 
         let mut res = std::mem::MaybeUninit::uninit();
-        wrap_err((*od).get_results(od, res.as_mut_ptr()))?;
+        wrap_err(((&*(&*od.0).vtable).get_results)(
+            od.0.cast(),
+            res.as_mut_ptr(),
+        ))?;
         let items = res.assume_init();
 
-        let count = items.GetCount()?;
+        let sia = items.0.cast();
+        let svt = &*(*items.0).vtable;
+
+        let mut count = 0;
+        wrap_err((svt.get_count)(sia, &mut count))?;
 
         let mut paths = Vec::with_capacity(count as usize);
-        for id in 0..count {
-            let res_item = items.GetItemAt(id)?;
+        for index in 0..count {
+            let mut item = std::mem::MaybeUninit::uninit();
+            wrap_err((svt.get_item_at)(sia, index, item.as_mut_ptr()))?;
+            let item = item.assume_init();
 
-            let path = (&*res_item).get_path()?;
+            let path = item.get_path()?;
             paths.push(path);
         }
 
@@ -290,19 +349,11 @@ impl DialogInner {
     }
 }
 
-impl Drop for DialogInner {
-    fn drop(&mut self) {
-        let s = self.fd();
-
-        s.base.base.release(s.cast());
-    }
-}
-
 pub struct IDialog(DialogInner, Option<HWND>);
 
 impl IDialog {
     fn new_open_dialog(opt: &FileDialog) -> Result<Self> {
-        let dialog = DialogInner::open()?;
+        let dialog = unsafe { DialogInner::open()? };
 
         let parent = match opt.parent {
             Some(RawWindowHandle::Win32(handle)) => Some(handle.hwnd as _),
@@ -314,7 +365,7 @@ impl IDialog {
     }
 
     fn new_save_dialog(opt: &FileDialog) -> Result<Self> {
-        let dialog = DialogInner::save()?;
+        let dialog = unsafe { DialogInner::save()? };
 
         let parent = match opt.parent {
             Some(RawWindowHandle::Win32(handle)) => Some(handle.hwnd as _),
@@ -374,12 +425,12 @@ impl IDialog {
     fn set_path(&self, path: &Option<PathBuf>) -> Result<()> {
         const SHELL_ITEM_IID: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
 
-        let Some(path) = path.and_then(|p| p.to_str()) else { return Ok(()) };
+        let Some(path) = path.as_ref().and_then(|p| p.to_str()) else { return Ok(()) };
 
         // Strip Win32 namespace prefix from the path
         let path = path.strip_prefix(r"\\?\").unwrap_or(path);
 
-        let mut wide_path: Vec<u16> = OsStr::new(path).encode_wide().chain(once(0)).collect();
+        let wide_path: Vec<u16> = OsStr::new(path).encode_wide().chain(once(0)).collect();
 
         unsafe {
             let mut item = std::mem::MaybeUninit::uninit();
@@ -392,8 +443,9 @@ impl IDialog {
             .is_ok()
             {
                 let item = item.assume_init();
+                let item = IShellItem(item.cast());
                 // For some reason SetDefaultFolder(), does not guarantees default path, so we use SetFolder
-                self.0.set_folder(item.as_ref())?;
+                self.0.set_folder(Some(&item))?;
             }
         }
 
