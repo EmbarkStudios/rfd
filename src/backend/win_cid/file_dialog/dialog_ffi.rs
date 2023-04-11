@@ -46,7 +46,6 @@ fn wrap_err(hresult: HRESULT) -> Result<()> {
     }
 }
 
-#[derive(Copy, Clone)]
 #[repr(C)]
 struct Interface<T> {
     vtable: *mut T,
@@ -77,7 +76,7 @@ fn drop_impl(ptr: *mut std::ffi::c_void) {
 
 #[repr(C)]
 struct IShellItemV {
-    pub base: IUnknownV,
+    base: IUnknownV,
     __bind_to_handler: usize,
     __get_parent: usize,
     get_display_name:
