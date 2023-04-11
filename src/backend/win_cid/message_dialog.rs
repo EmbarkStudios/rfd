@@ -1,16 +1,13 @@
 use super::thread_future::ThreadFuture;
 use crate::message_dialog::{MessageButtons, MessageDialog, MessageLevel};
 
-use windows::{
-    core::PCWSTR,
-    Win32::{
-        Foundation::HWND,
-        UI::WindowsAndMessaging::{IDOK, IDYES},
-    },
+use windows_sys::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{IDOK, IDYES},
 };
 
 #[cfg(not(feature = "common-controls-v6"))]
-use windows::Win32::UI::WindowsAndMessaging::{
+use windows_sys::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_YESNO,
     MESSAGEBOX_STYLE,
 };
@@ -20,7 +17,7 @@ use raw_window_handle::RawWindowHandle;
 use std::{ffi::OsStr, iter::once, os::windows::ffi::OsStrExt};
 
 pub struct WinMessageDialog {
-    parent: Option<HWND>,
+    parent: HWND,
     text: Vec<u16>,
     caption: Vec<u16>,
     #[cfg(not(feature = "common-controls-v6"))]
@@ -57,8 +54,8 @@ impl WinMessageDialog {
         };
 
         let parent = match opt.parent {
-            Some(RawWindowHandle::Win32(handle)) => Some(HWND(handle.hwnd as _)),
-            None => None,
+            Some(RawWindowHandle::Win32(handle)) => handle.hwnd,
+            None => 0,
             _ => unreachable!("unsupported window handle, expected: Windows"),
         };
 
@@ -75,7 +72,7 @@ impl WinMessageDialog {
 
     #[cfg(feature = "common-controls-v6")]
     pub fn run(mut self) -> bool {
-        use windows::Win32::{
+        use windows_sys::Win32::{
             Foundation::BOOL,
             UI::Controls::{
                 TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON,
@@ -166,8 +163,8 @@ impl WinMessageDialog {
         let ret = unsafe {
             MessageBoxW(
                 self.parent,
-                PCWSTR(self.text.as_mut_ptr()),
-                PCWSTR(self.caption.as_mut_ptr()),
+                self.text.as_ptr(),
+                self.caption.as_ptr(),
                 self.flags,
             )
         };

@@ -2,11 +2,9 @@ use super::super::thread_future::ThreadFuture;
 use super::super::utils::init_com;
 use super::dialog_ffi::IDialog;
 
-use windows::core::Result;
-
 use crate::file_handle::FileHandle;
 
-pub fn single_return_future<F: FnOnce() -> Result<IDialog> + Send + 'static>(
+pub fn single_return_future<F: FnOnce() -> Result<IDialog, i32> + Send + 'static>(
     build: F,
 ) -> ThreadFuture<Option<FileHandle>> {
     ThreadFuture::new(move |data| {
@@ -28,7 +26,7 @@ pub fn single_return_future<F: FnOnce() -> Result<IDialog> + Send + 'static>(
     })
 }
 
-pub fn multiple_return_future<F: FnOnce() -> Result<IDialog> + Send + 'static>(
+pub fn multiple_return_future<F: FnOnce() -> Result<IDialog, i32> + Send + 'static>(
     build: F,
 ) -> ThreadFuture<Option<Vec<FileHandle>>> {
     ThreadFuture::new(move |data| {
