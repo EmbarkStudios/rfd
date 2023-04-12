@@ -162,10 +162,8 @@ struct IFileDialogV {
         unsafe extern "system" fn(this: *mut c_void, options: FILEOPENDIALOGOPTIONS) -> HRESULT,
     __get_options: usize,
     __set_default_folder: usize,
-    set_folder: unsafe extern "system" fn(
-        this: *mut c_void,
-        shell_item: Option<*mut IShellItem>,
-    ) -> HRESULT,
+    set_folder:
+        unsafe extern "system" fn(this: *mut c_void, shell_item: Option<*mut c_void>) -> HRESULT,
     __get_folder: usize,
     __get_current_selection: usize,
     set_file_name: unsafe extern "system" fn(this: *mut c_void, name: PCWSTR) -> HRESULT,
@@ -203,7 +201,6 @@ struct IFileOpenDialogV {
     __get_selected_items: usize,
 }
 
-#[repr(C)]
 struct IFileOpenDialog(*mut Interface<IFileOpenDialogV>);
 
 impl Drop for IFileOpenDialog {
@@ -229,16 +226,16 @@ impl DialogInner {
                 (&FileSaveDialog, &FILE_SAVE_DIALOG_IID)
             };
 
-            let mut inner = std::mem::MaybeUninit::uninit();
+            let mut iptr = std::mem::MaybeUninit::<*mut std::ffi::c_void>::uninit();
             wrap_err(CoCreateInstance(
                 cls_id,
                 std::ptr::null_mut(),
                 CLSCTX_INPROC_SERVER,
                 iid,
-                inner.as_mut_ptr(),
+                iptr.as_mut_ptr(),
             ))?;
 
-            let iptr = inner.assume_init();
+            let iptr = iptr.assume_init();
 
             Ok(if open {
                 Self::Open(IFileOpenDialog(iptr.cast()))
@@ -261,8 +258,8 @@ impl DialogInner {
     #[inline]
     unsafe fn fd(&self) -> (*mut std::ffi::c_void, &IFileDialogV) {
         match self {
-            Self::Save(s) => unsafe { (s.0.cast(), &*(*s.0).vtable) },
-            Self::Open(o) => unsafe { (o.0.cast(), &(&*(*o.0).vtable).base) },
+            Self::Save(s) => unsafe { (s.0.cast(), (*s.0).vtbl()) },
+            Self::Open(o) => unsafe { (o.0.cast(), &(*o.0).vtbl().base) },
         }
     }
 
@@ -299,6 +296,7 @@ impl DialogInner {
     #[inline]
     unsafe fn set_folder(&self, folder: Option<&IShellItem>) -> Result<()> {
         let (d, v) = self.fd();
+        //panic!("{:p}", v.set_folder as *const std::ffi::c_void);
         wrap_err((v.set_folder)(d, folder.map(|si| si.0.cast())))
     }
 
@@ -432,17 +430,16 @@ impl IDialog {
         let wide_path: Vec<u16> = OsStr::new(path).encode_wide().chain(once(0)).collect();
 
         unsafe {
-            let mut item = std::mem::MaybeUninit::uninit();
+            let mut item = std::mem::MaybeUninit::<IShellItem>::uninit();
             if wrap_err(SHCreateItemFromParsingName(
                 wide_path.as_ptr(),
                 std::ptr::null_mut(),
                 &SHELL_ITEM_IID,
-                item.as_mut_ptr(),
+                item.as_mut_ptr().cast(),
             ))
             .is_ok()
             {
                 let item = item.assume_init();
-                let item = IShellItem(item.cast());
                 // For some reason SetDefaultFolder(), does not guarantees default path, so we use SetFolder
                 self.0.set_folder(Some(&item))?;
             }
@@ -598,7 +595,7 @@ mod test {
 
             let dir = utf("C:\\Users\\ark\\code\\ohno\0");
 
-            let mut folder = std::mem::MaybeUninit::<IShellItem>::uninit();
+            let mut folder = std::mem::MaybeUninit::<*mut Interface<IShellItemV>>::uninit();
 
             const SHELL_ITEM_IID: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
             if SHCreateItemFromParsingName(
@@ -611,7 +608,19 @@ mod test {
                 panic!("failed to create shell item");
             }
 
-            let folder = folder.assume_init();
+            //let folder = folder.assume_init();
+            let folder = IShellItem(folder.assume_init());
+
+            panic!("{:?}", folder.get_path().unwrap());
+
+            assert_eq!(
+                dbg!(folder.get_path())
+                    .expect("failed to get path")
+                    .to_str()
+                    .unwrap(),
+                "C:\\Users\\ark\\code\\ohno"
+            );
+
             di.set_folder(Some(&folder)).expect("failed to set folder");
 
             // if(FAILED(diag->lpVtbl->Show(diag, 0))) {
