@@ -551,3 +551,75 @@ impl IDialog {
         Ok(dialog)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use windows_sys::Win32::System::Com::*;
+
+    #[test]
+    fn ugh() {
+        unsafe {
+            if CoInitializeEx(
+                std::ptr::null(),
+                COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
+            ) != 0
+            {
+                panic!("fuck");
+            }
+
+            let di = DialogInner::open().expect("oh no");
+
+            #[inline]
+            fn utf(ugh: &str) -> Vec<u16> {
+                OsStr::new(ugh).encode_wide().collect()
+            }
+
+            di.set_default_extension(&utf("txt\0"))
+                .expect("failed to set extension");
+
+            let text = utf("text\0");
+            let text_spec = utf("*.rs;*.txt\0");
+            let rust = utf("rust\0");
+            let rust_spec = utf("*.rs;*.toml\0");
+
+            let specs = &[
+                COMDLG_FILTERSPEC {
+                    pszName: text.as_ptr(),
+                    pszSpec: text_spec.as_ptr(),
+                },
+                COMDLG_FILTERSPEC {
+                    pszName: rust.as_ptr(),
+                    pszSpec: rust_spec.as_ptr(),
+                },
+            ];
+
+            di.set_file_types(specs).expect("failed to set file types");
+
+            let dir = utf("C:\\Users\\ark\\code\\ohno\0");
+
+            let mut folder = std::mem::MaybeUninit::<IShellItem>::uninit();
+
+            const SHELL_ITEM_IID: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
+            if SHCreateItemFromParsingName(
+                dir.as_ptr(),
+                std::ptr::null_mut(),
+                &SHELL_ITEM_IID,
+                folder.as_mut_ptr().cast(),
+            ) != 0
+            {
+                panic!("failed to create shell item");
+            }
+
+            let folder = folder.assume_init();
+            di.set_folder(Some(&folder)).expect("failed to set folder");
+
+            // if(FAILED(diag->lpVtbl->Show(diag, 0))) {
+            //     MessageBox(0, "Can't show dialog",
+            //                 "Show error",
+            //                 MB_OK | MB_ICONEXCLAMATION
+            //     );
+            // }
+        }
+    }
+}
